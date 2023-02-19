@@ -11,3 +11,4 @@ Two example is provided in `main.c`
 
 1. A simple gpio led blink example
 2. SPI communication with AVR chip implemented by bitbang
+3. i2c scanner
