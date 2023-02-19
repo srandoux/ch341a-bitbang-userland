@@ -23,6 +23,9 @@
 
 struct libusb_device_handle *dev_handle = NULL;
 
+static uint8_t in_buf[32];
+static uint8_t out_buf[32];
+
 /* Configure CH341A, find the device and set the default interface. */
 int32_t ch341a_configure(uint16_t vid, uint16_t pid)
 {
@@ -164,4 +167,176 @@ int32_t ch341a_gpio_instruct(uint8_t* dir_mask, uint8_t* data)
     *data &= *dir_mask;
     *data |= buf[0] & ~*dir_mask;
     return ret;
+}
+
+
+int32_t ch341a_i2c_configure()
+{
+    uint8_t buf[3];
+    int ret;
+
+    buf[0] = CH341A_CMD_UIO_STREAM;
+    buf[1] = CH341_CMD_I2C_STM_SET | CH341_I2C_STANDARD_SPEED;
+    buf[2] = CH341_CMD_I2C_STM_END;
+
+    ret = usb_transfer(__func__, BULK_WRITE_ENDPOINT, buf, 3);
+    if (ret != 3){
+        printf("ch341a_i2c_configure =%d\n", ret);
+    }
+    return 0;
+}
+
+
+/* ----- begin of i2c layer ---------------------------------------------- */
+static int ch341_xfer(int out_len, int in_len)
+{
+	int ret;
+
+	//dev_dbg(&dev->adapter.dev, "bulk_out %d bytes, bulk_in %d bytes\n",
+	//	out_len, (in_len == 0) ? 0 : 32);
+
+    ret = usb_transfer(__func__, BULK_WRITE_ENDPOINT, out_buf, out_len);
+    if (ret < 0) return -1;
+
+	if (in_len == 0)
+		return ret;
+
+	memset(in_buf, 0, 32);
+    ret = usb_transfer(__func__, BULK_READ_ENDPOINT, in_buf, 32);
+
+	if (ret < 0)
+		return ret;
+
+	return ret;
+}
+
+static int ch341_i2c_check_dev(uint8_t addr)
+{
+	int retval;
+
+	out_buf[0] = CH341_CMD_I2C_STREAM;
+	out_buf[1] = CH341_CMD_I2C_STM_STA;
+	out_buf[2] = CH341_CMD_I2C_STM_OUT; /* NOTE: must be zero length otherwise it
+					  messes up the device */
+	out_buf[3] = (addr << 1) | 0x1;
+	out_buf[4] = CH341_CMD_I2C_STM_IN; /* NOTE: zero length here as well */
+	out_buf[5] = CH341_CMD_I2C_STM_STO;
+	out_buf[6] = CH341_CMD_I2C_STM_END;
+
+	retval = ch341_xfer( 6, 1);
+	if (retval < 0)
+		return retval;
+
+	if (in_buf[0] & 0x80)
+		return -ETIMEDOUT;
+
+	return 0;
+}
+
+int ch341_i2c_xfer(struct i2c_msg *msgs, int num)
+{
+	//struct i2c_ch341_usb *dev = (struct i2c_ch341_usb *)adapter->algo_data;
+	int retval;
+	int i;
+	int l;
+
+	retval = ch341_i2c_check_dev(msgs[0].addr);
+	if (retval < 0)
+		return retval;
+
+	if (num == 1) {
+		/* size larger than endpoint max transfer size */
+		if ((msgs[0].len + 5) > 32)
+			return -EIO;
+
+		if (msgs[0].flags & I2C_M_RD) {
+			out_buf[0] = CH341_CMD_I2C_STREAM;
+			out_buf[1] = CH341_CMD_I2C_STM_STA;
+			out_buf[2] = CH341_CMD_I2C_STM_OUT | 0x1;
+			out_buf[3] = (msgs[0].addr << 1) | 0x1;
+
+			if (msgs[0].len) {
+				for (i = 0, l = msgs[0].len; l > 1; l--, i++)
+					out_buf[i + 4] =
+						CH341_CMD_I2C_STM_IN | 1;
+				out_buf[msgs[0].len + 3] =
+					CH341_CMD_I2C_STM_IN;
+			}
+
+			out_buf[msgs[0].len + 4] = CH341_CMD_I2C_STM_STO;
+			out_buf[msgs[0].len + 5] = CH341_CMD_I2C_STM_END;
+
+			retval = ch341_xfer( msgs[0].len + 5, msgs[0].len);
+			if (retval < 0)
+				return retval;
+
+			memcpy(msgs[0].buf, in_buf, msgs[0].len);
+		} else {
+			out_buf[0] = CH341_CMD_I2C_STREAM;
+			out_buf[1] = CH341_CMD_I2C_STM_STA;
+			out_buf[2] =
+				CH341_CMD_I2C_STM_OUT | (msgs[0].len + 1);
+			out_buf[3] = msgs[0].addr << 1;
+
+			memcpy(&out_buf[4], msgs[0].buf, msgs[0].len);
+
+			out_buf[msgs[0].len + 4] = CH341_CMD_I2C_STM_STO;
+			out_buf[msgs[0].len + 5] = CH341_CMD_I2C_STM_END;
+
+			retval = ch341_xfer( msgs[0].len + 5, 0);
+			if (retval < 0)
+				return retval;
+		}
+	} else if (num == 2) {
+		if (!(msgs[0].flags & I2C_M_RD) && (msgs[1].flags & I2C_M_RD)) {
+			/* size larger than endpoint max transfer size */
+			if (((msgs[0].len + 3) > 32)
+			    || ((msgs[1].len + 5) > 32))
+				return -EIO;
+
+			/* write data phase */
+			out_buf[0] = CH341_CMD_I2C_STREAM;
+			out_buf[1] = CH341_CMD_I2C_STM_STA;
+			out_buf[2] =
+				CH341_CMD_I2C_STM_OUT | (msgs[0].len + 1);
+			out_buf[3] = msgs[0].addr << 1;
+
+			memcpy(&out_buf[4], msgs[0].buf, msgs[0].len);
+
+			retval = ch341_xfer( msgs[0].len + 4, 0);
+			if (retval < 0)
+				return retval;
+
+			/* read data phase */
+			out_buf[0] = CH341_CMD_I2C_STREAM;
+			out_buf[1] = CH341_CMD_I2C_STM_STA;
+			out_buf[2] = CH341_CMD_I2C_STM_OUT | 0x1;
+			out_buf[3] = (msgs[1].addr << 1) | 0x1;
+
+			if (msgs[1].len) {
+				for (i = 0, l = msgs[1].len; l > 1; l--, i++)
+					out_buf[i + 4] =
+						CH341_CMD_I2C_STM_IN | 1;
+				out_buf[msgs[1].len + 3] =
+					CH341_CMD_I2C_STM_IN;
+			}
+
+			out_buf[msgs[1].len + 4] = CH341_CMD_I2C_STM_STO;
+			out_buf[msgs[1].len + 5] = CH341_CMD_I2C_STM_END;
+
+			retval = ch341_xfer( msgs[1].len + 5, msgs[1].len);
+			if (retval < 0)
+				return retval;
+
+			memcpy(msgs[1].buf, in_buf, msgs[1].len);
+		} else {
+			return -EIO;
+		}
+	} else {
+		printf(
+			"This case(num > 2) has not been support now\n");
+		return -EIO;
+	}
+
+	return num;
 }

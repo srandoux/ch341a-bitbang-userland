@@ -126,6 +126,24 @@ int testavr() {
     }
     return ret;
 }
+int testi2c(){
+        
+    int ret;
+    uint8_t command[] = {};
+
+    ret=ch341a_i2c_configure();
+    printf("ch341a_i2c_configure =%d\n",ret);
+
+
+    for (int i=0; i< 0x7f; i++){
+        struct i2c_msg message = { i, 0, sizeof(command), command };
+
+        ret=ch341_i2c_xfer(&message, 1);
+        printf("a=%x - ret=%d\n",i,ret);
+    }
+
+    return 0;
+}
 
 int main() {
     int ret;
@@ -134,7 +152,8 @@ int main() {
     if (ret < 0) return -1;
 
     // ret = testblink();
-    ret = testavr();
+    //ret = testavr();
+    ret = testi2c();
 
     printf("\nreturn: %d\n", ret);
     return ch341a_release();
